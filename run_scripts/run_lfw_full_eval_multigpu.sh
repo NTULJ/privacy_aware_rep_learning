@@ -5,16 +5,19 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-EXTRACTOR_SCRIPT="${EXTRACTOR_SCRIPT:-$ROOT_DIR/scripts/extract_qwen_vl_features_uniform_noise.py}"
+EXTRACTOR_SCRIPT="${EXTRACTOR_SCRIPT:-$ROOT_DIR/scripts/extract_qwen_vl_features.py}"
 MODEL_ID="${MODEL_ID:-$ROOT_DIR/models/Qwen3-VL-8B-Instruct}"
-DATASET_ROOT="${DATASET_ROOT:-$ROOT_DIR/data/Stanford40/images}"
-OUTPUT_TAG="${OUTPUT_TAG:-stanford40_full_mgpu_uniform_$(date +%Y%m%d_%H%M%S)}"
+DATASET_ROOT="${DATASET_ROOT:-$ROOT_DIR/data/lfw}"
+DATASET_NAME="${DATASET_NAME:-lfw}"
+PAIR_FILE="${PAIR_FILE:-$ROOT_DIR/data/lfw_pairs.csv}"
+OUTPUT_TAG="${OUTPUT_TAG:-lfw_full_mgpu_$(date +%Y%m%d_%H%M%S)}"
 WORK_ROOT="${WORK_ROOT:-$ROOT_DIR/runs/mgpu/$OUTPUT_TAG}"
 OUTPUT_FEATURE_ROOT="${OUTPUT_FEATURE_ROOT:-$ROOT_DIR/runs/features/$OUTPUT_TAG}"
 OUTPUT_PROBE_ROOT="${OUTPUT_PROBE_ROOT:-$ROOT_DIR/runs/probes/$OUTPUT_TAG}"
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 PROCS_PER_GPU="${PROCS_PER_GPU:-1}"
 DEVICE_DTYPE="${DTYPE:-bfloat16}"
+PROBE_DEVICE="${PROBE_DEVICE:-cuda:0}"
 EPSILON="${EPSILON:-64.0}"
 DELTA_PRIV="${DELTA_PRIV:-1e-5}"
 DELTA_MASK="${DELTA_MASK:-0.05}"
@@ -28,7 +31,7 @@ FACE_CONF="${FACE_CONF:-0.20}"
 PERSON_CONF="${PERSON_CONF:-0.25}"
 YUNET_MODEL="${YUNET_MODEL:-$ROOT_DIR/models/face_detection_yunet_2023mar.onnx}"
 YUNET_SCORE_THRESHOLD="${YUNET_SCORE_THRESHOLD:-0.55}"
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-300}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-120}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
 TRAIN_LR="${TRAIN_LR:-1e-2}"
 TRAIN_WEIGHT_DECAY="${TRAIN_WEIGHT_DECAY:-1e-4}"
@@ -38,9 +41,16 @@ SAVE_TOKENS="${SAVE_TOKENS:-0}"
 EXTRA_EXTRACT_ARGS="${EXTRA_EXTRACT_ARGS:-}"
 EXTRA_PROBE_ARGS="${EXTRA_PROBE_ARGS:-}"
 KEEP_SHARDS="${KEEP_SHARDS:-1}"
-NOISE_SCALE_MULTIPLIER="${NOISE_SCALE_MULTIPLIER:-1.0}"
+NOISE_SCALE_MULTIPLIER="${NOISE_SCALE_MULTIPLIER:-0.05}"
+NOISE_DISTRIBUTION="${NOISE_DISTRIBUTION:-spatial_diag}"
+SPATIAL_REWEIGHTING="${SPATIAL_REWEIGHTING:-true}"
 PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 LOG_UPDATE_INTERVAL="${LOG_UPDATE_INTERVAL:-20}"
+EXTRACT_STAGES="${EXTRACT_STAGES:-hpool_clean hpool_priv}"
+VERIFICATION_FEATURE_CLEAN="${VERIFICATION_FEATURE_CLEAN:-hpool_clean__head_mean}"
+VERIFICATION_FEATURE_PRIV="${VERIFICATION_FEATURE_PRIV:-hpool_priv__head_mean}"
+VERIFICATION_METRIC="${VERIFICATION_METRIC:-cosine}"
+FAR_TARGET="${FAR_TARGET:-0.01}"
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_IDS"
 SHARD_COUNT=$(( ${#GPU_ARRAY[@]} * PROCS_PER_GPU ))
@@ -55,52 +65,16 @@ SHARD_OUTPUT_DIR="$WORK_ROOT/shards"
 LOG_DIR="$WORK_ROOT/logs"
 mkdir -p "$WORK_ROOT" "$SHARD_MANIFEST_DIR" "$SHARD_OUTPUT_DIR" "$LOG_DIR" "$OUTPUT_FEATURE_ROOT" "$OUTPUT_PROBE_ROOT"
 
-export ROOT_DIR DATASET_ROOT MASTER_MANIFEST SHARD_MANIFEST_DIR SHARD_COUNT
-"$PYTHON_BIN" - <<'PY'
-import json
-import os
-from pathlib import Path
-
-root = Path(os.environ['DATASET_ROOT'])
-master_manifest = Path(os.environ['MASTER_MANIFEST'])
-manifest_dir = Path(os.environ['SHARD_MANIFEST_DIR'])
-shard_count = int(os.environ['SHARD_COUNT'])
-
-images = sorted([p for p in root.iterdir() if p.is_file() and p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}])
-records = []
-for path in images:
-    stem = path.stem
-    label = stem.rsplit('_', 1)[0] if '_' in stem else stem
-    records.append({
-        'sample_id': stem,
-        'image_path': str(path.resolve()),
-        'split': 'all',
-        'label': label,
-        'dataset': 'stanford40',
-        'person_id': '',
-    })
-master_manifest.parent.mkdir(parents=True, exist_ok=True)
-with master_manifest.open('w', encoding='utf-8') as handle:
-    for record in records:
-        handle.write(json.dumps(record, ensure_ascii=True) + '\n')
-
-shards = [[] for _ in range(shard_count)]
-for idx, record in enumerate(records):
-    shards[idx % shard_count].append(record)
-
-manifest_dir.mkdir(parents=True, exist_ok=True)
-for shard_idx, shard_records in enumerate(shards):
-    shard_path = manifest_dir / f'shard_{shard_idx:02d}.jsonl'
-    with shard_path.open('w', encoding='utf-8') as handle:
-        for record in shard_records:
-            handle.write(json.dumps(record, ensure_ascii=True) + '\n')
-print(f'prepared {len(records)} samples into {shard_count} shards at {manifest_dir}')
-PY
+"$PYTHON_BIN" "$ROOT_DIR/scripts/build_dataset_manifests.py" \
+  --dataset-root "$DATASET_ROOT" \
+  --dataset-name "$DATASET_NAME" \
+  --shard-count "$SHARD_COUNT" \
+  --master-manifest "$MASTER_MANIFEST" \
+  --shard-manifest-dir "$SHARD_MANIFEST_DIR"
 
 run_shard() {
   local shard_idx="$1"
-  local gpu_slot="$2"
-  local gpu_id="$3"
+  local gpu_id="$2"
   local shard_manifest="$SHARD_MANIFEST_DIR/shard_$(printf '%02d' "$shard_idx").jsonl"
   local shard_output="$SHARD_OUTPUT_DIR/shard_$(printf '%02d' "$shard_idx")"
   local shard_log="$LOG_DIR/shard_$(printf '%02d' "$shard_idx").log"
@@ -127,8 +101,11 @@ run_shard() {
     --person-conf "$PERSON_CONF"
     --yunet-model "$YUNET_MODEL"
     --yunet-score-threshold "$YUNET_SCORE_THRESHOLD"
-    --stages hpool_clean hpool_priv
   )
+  extract_cmd+=(--stages)
+  # shellcheck disable=SC2206
+  extract_stages=( $EXTRACT_STAGES )
+  extract_cmd+=("${extract_stages[@]}")
 
   if [[ "$LOCAL_FILES_ONLY" == "1" ]]; then
     extract_cmd+=(--local-files-only)
@@ -188,7 +165,7 @@ for gpu_id in "${GPU_ARRAY[@]}"; do
     if [[ "$shard_idx" -ge "$SHARD_COUNT" ]]; then
       break
     fi
-    run_shard "$shard_idx" "$slot" "$gpu_id" &
+    run_shard "$shard_idx" "$gpu_id" &
     pids+=("$!")
     shard_idx=$((shard_idx + 1))
   done
@@ -298,8 +275,6 @@ for shard_dir in shard_dirs:
 
 if config_payload is not None:
     config_payload['merged_from_shards'] = shard_count
-    config_payload['noise_distribution'] = 'uniform_global'
-    config_payload['spatial_reweighting'] = False
     (out_root / 'config.json').write_text(json.dumps(config_payload, indent=2), encoding='utf-8')
 
 (out_root / 'manifest.jsonl').write_text('\n'.join(manifest_lines) + ('\n' if manifest_lines else ''), encoding='utf-8')
@@ -332,16 +307,17 @@ run_probe() {
     "$PYTHON_BIN" "$ROOT_DIR/scripts/train_linear_probe.py"
     --feature-root "$OUTPUT_FEATURE_ROOT"
     --feature-key "$feature_key"
-    --task classification
+    --task verification
+    --pair-file "$PAIR_FILE"
+    --metric "$VERIFICATION_METRIC"
+    --far-target "$FAR_TARGET"
     --output "$OUTPUT_PROBE_ROOT/$run_name"
-    --standardize
-    --class-weight balanced
     --epochs "$TRAIN_EPOCHS"
     --batch-size "$TRAIN_BATCH_SIZE"
     --lr "$TRAIN_LR"
     --weight-decay "$TRAIN_WEIGHT_DECAY"
     --seed "$SEED"
-    --device cuda:0
+    --device "$PROBE_DEVICE"
   )
   if [[ -n "$EXTRA_PROBE_ARGS" ]]; then
     # shellcheck disable=SC2206
@@ -351,20 +327,14 @@ run_probe() {
   "${probe_cmd[@]}"
 }
 
-echo "[probe 1/4] clean global"
-run_probe "hpool_clean__global_mean" "hpool_clean_global"
+echo "[probe 1/2] clean verification"
+run_probe "$VERIFICATION_FEATURE_CLEAN" "clean_verification"
 
-echo "[probe 2/4] priv global"
-run_probe "hpool_priv__global_mean" "hpool_priv_global"
-
-echo "[probe 3/4] clean nonhead-human"
-run_probe "hpool_clean__nonhead_human_mean" "hpool_clean_nonhead"
-
-echo "[probe 4/4] priv nonhead-human"
-run_probe "hpool_priv__nonhead_human_mean" "hpool_priv_nonhead"
+echo "[probe 2/2] priv verification"
+run_probe "$VERIFICATION_FEATURE_PRIV" "priv_verification"
 
 SUMMARY_PATH="$OUTPUT_PROBE_ROOT/summary.json"
-export SUMMARY_PATH OUTPUT_FEATURE_ROOT OUTPUT_PROBE_ROOT EPSILON DELTA_PRIV DELTA_MASK CLIP_NORM PATCH_ALPHA UPPER_BODY_WEIGHT GPU_IDS PROCS_PER_GPU DEVICE_DTYPE DATASET_ROOT MODEL_ID NOISE_SCALE_MULTIPLIER EXTRACTOR_SCRIPT
+export SUMMARY_PATH OUTPUT_FEATURE_ROOT OUTPUT_PROBE_ROOT EPSILON DELTA_PRIV DELTA_MASK CLIP_NORM PATCH_ALPHA UPPER_BODY_WEIGHT GPU_IDS PROCS_PER_GPU DEVICE_DTYPE DATASET_ROOT MODEL_ID NOISE_SCALE_MULTIPLIER NOISE_DISTRIBUTION SPATIAL_REWEIGHTING EXTRACTOR_SCRIPT PAIR_FILE VERIFICATION_FEATURE_CLEAN VERIFICATION_FEATURE_PRIV VERIFICATION_METRIC FAR_TARGET
 "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -376,6 +346,7 @@ summary = {
     'feature_root': str(feature_root),
     'probe_root': str(probe_root),
     'dataset_root': os.environ['DATASET_ROOT'],
+    'pair_file': os.environ['PAIR_FILE'],
     'model_id': os.environ['MODEL_ID'],
     'extractor_script': os.environ['EXTRACTOR_SCRIPT'],
     'epsilon': float(os.environ['EPSILON']),
@@ -383,16 +354,20 @@ summary = {
     'delta_mask': float(os.environ['DELTA_MASK']),
     'clip_norm': float(os.environ['CLIP_NORM']),
     'noise_scale_multiplier': float(os.environ['NOISE_SCALE_MULTIPLIER']),
-    'noise_distribution': 'uniform_global',
-    'spatial_reweighting': False,
+    'noise_distribution': os.environ['NOISE_DISTRIBUTION'],
+    'spatial_reweighting': os.environ['SPATIAL_REWEIGHTING'].lower() == 'true',
     'patch_alpha': float(os.environ['PATCH_ALPHA']),
     'upper_body_weight': float(os.environ['UPPER_BODY_WEIGHT']),
     'gpu_ids': os.environ['GPU_IDS'],
     'procs_per_gpu': int(os.environ['PROCS_PER_GPU']),
     'dtype': os.environ['DEVICE_DTYPE'],
+    'verification_metric': os.environ['VERIFICATION_METRIC'],
+    'far_target': float(os.environ['FAR_TARGET']),
+    'verification_feature_clean': os.environ['VERIFICATION_FEATURE_CLEAN'],
+    'verification_feature_priv': os.environ['VERIFICATION_FEATURE_PRIV'],
     'results': {},
 }
-for name in ['hpool_clean_global', 'hpool_priv_global', 'hpool_clean_nonhead', 'hpool_priv_nonhead']:
+for name in ['clean_verification', 'priv_verification']:
     metrics_path = probe_root / name / 'metrics.json'
     if metrics_path.exists():
         summary['results'][name] = json.loads(metrics_path.read_text(encoding='utf-8'))
