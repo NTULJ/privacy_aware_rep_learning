@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -120,7 +120,7 @@ for injection_stage in "${INJECTION_STAGES[@]}"; do
     FAR_TARGET="$FAR_TARGET" \
     EXTRA_PROBE_ARGS="$EXTRA_PROBE_ARGS" \
     EXTRA_EXTRACT_ARGS="--injection-stage $injection_stage $EXTRA_EXTRACT_ARGS" \
-    bash "$ROOT_DIR/run_lfw_full_eval_multigpu.sh" 2>&1 | tee -a "$log_path"
+    bash "$ROOT_DIR/run_scripts/run_lfw_full_eval_multigpu.sh" 2>&1 | tee -a "$log_path"
 
   summary_src="$ROOT_DIR/runs/probes/$output_tag/summary.json"
   summary_dst="$SUMMARY_DIR/${injection_stage}.json"

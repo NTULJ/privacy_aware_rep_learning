@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -118,7 +118,7 @@ if [[ "$RUN_STANFORD_OURS" == "1" ]]; then
     OUTPUT_TAG="$STANFORD_OURS_OUTPUT_TAG" \
     DATASET_ROOT="$STANFORD_DATASET_ROOT" \
     NOISE_SCALE_MULTIPLIER="$OURS_NOISE_SCALE_MULTIPLIER" \
-    bash "$ROOT_DIR/run_stanford40_full_eval_multigpu.sh"
+    bash "$ROOT_DIR/run_scripts/run_stanford40_full_eval_multigpu.sh"
 fi
 
 if [[ "$RUN_STANFORD_UNIFORM" == "1" ]]; then
@@ -127,7 +127,7 @@ if [[ "$RUN_STANFORD_UNIFORM" == "1" ]]; then
     OUTPUT_TAG="$STANFORD_UNIFORM_OUTPUT_TAG" \
     DATASET_ROOT="$STANFORD_DATASET_ROOT" \
     NOISE_SCALE_MULTIPLIER="$UNIFORM_NOISE_SCALE_MULTIPLIER" \
-    bash "$ROOT_DIR/run_stanford40_full_eval_multigpu_uniform_noise.sh"
+    bash "$ROOT_DIR/run_scripts/run_stanford40_full_eval_multigpu_uniform_noise.sh"
 fi
 
 if [[ "$RUN_STANFORD_STAGE" == "1" ]]; then
@@ -137,7 +137,7 @@ if [[ "$RUN_STANFORD_STAGE" == "1" ]]; then
     DATASET_ROOT="$STANFORD_DATASET_ROOT" \
     RUN_ONLY="$STAGE_RUN_ONLY" \
     NOISE_SCALE_MULTIPLIER="$STAGE_NOISE_SCALE_MULTIPLIER" \
-    bash "$ROOT_DIR/run_stanford40_full_eval_multigpu_stage_injection.sh"
+    bash "$ROOT_DIR/run_scripts/run_stanford40_full_eval_multigpu_stage_injection.sh"
 fi
 
 if [[ "$RUN_LFW_OURS" == "1" ]]; then
@@ -147,7 +147,7 @@ if [[ "$RUN_LFW_OURS" == "1" ]]; then
     DATASET_ROOT="$LFW_DATASET_ROOT" \
     PAIR_FILE="$LFW_PAIR_FILE" \
     NOISE_SCALE_MULTIPLIER="$OURS_NOISE_SCALE_MULTIPLIER" \
-    bash "$ROOT_DIR/run_lfw_full_eval_multigpu.sh"
+    bash "$ROOT_DIR/run_scripts/run_lfw_full_eval_multigpu.sh"
 fi
 
 if [[ "$RUN_LFW_UNIFORM" == "1" ]]; then
@@ -157,7 +157,7 @@ if [[ "$RUN_LFW_UNIFORM" == "1" ]]; then
     DATASET_ROOT="$LFW_DATASET_ROOT" \
     PAIR_FILE="$LFW_PAIR_FILE" \
     NOISE_SCALE_MULTIPLIER="$UNIFORM_NOISE_SCALE_MULTIPLIER" \
-    bash "$ROOT_DIR/run_lfw_full_eval_multigpu_uniform_noise.sh"
+    bash "$ROOT_DIR/run_scripts/run_lfw_full_eval_multigpu_uniform_noise.sh"
 fi
 
 if [[ "$RUN_LFW_STAGE" == "1" ]]; then
@@ -168,7 +168,7 @@ if [[ "$RUN_LFW_STAGE" == "1" ]]; then
     PAIR_FILE="$LFW_PAIR_FILE" \
     RUN_ONLY="$STAGE_RUN_ONLY" \
     NOISE_SCALE_MULTIPLIER="$STAGE_NOISE_SCALE_MULTIPLIER" \
-    bash "$ROOT_DIR/run_lfw_full_eval_multigpu_stage_injection.sh"
+    bash "$ROOT_DIR/run_scripts/run_lfw_full_eval_multigpu_stage_injection.sh"
 fi
 
 STANFORD_OURS_SUMMARY="$ROOT_DIR/runs/probes/$STANFORD_OURS_OUTPUT_TAG/summary.json"

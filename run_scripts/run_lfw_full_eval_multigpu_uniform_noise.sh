@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 env \
@@ -10,4 +10,4 @@ env \
   NOISE_SCALE_MULTIPLIER="${NOISE_SCALE_MULTIPLIER:-1.0}" \
   NOISE_DISTRIBUTION="${NOISE_DISTRIBUTION:-uniform_global}" \
   SPATIAL_REWEIGHTING="${SPATIAL_REWEIGHTING:-false}" \
-  bash "$ROOT_DIR/run_lfw_full_eval_multigpu.sh"
+  bash "$ROOT_DIR/run_scripts/run_lfw_full_eval_multigpu.sh"
