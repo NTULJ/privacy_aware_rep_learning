@@ -1,0 +1,16 @@
+name: privacy_aware_detection
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - pillow
+  - pip:
+      - transformers==5.3.0
+      - ultralytics==8.4.22
+      - opencv-python==4.13.0.92
+      - huggingface-hub==1.7.1
+      - safetensors==0.7.0
