@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -42,6 +42,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--standardize", action="store_true")
     parser.add_argument("--class-weight", choices=("none", "balanced"), default="none")
     parser.add_argument("--pair-file", type=Path, default=None)
+    parser.add_argument("--id-a-key", default="sample_id_a")
+    parser.add_argument("--id-b-key", default="sample_id_b")
+    parser.add_argument("--pair-label-key", default="pair_label")
     parser.add_argument("--metric", choices=("cosine", "linear_probe"), default="cosine")
     parser.add_argument("--far-target", type=float, default=0.01)
     parser.add_argument("--device", default="cpu")
@@ -301,6 +304,53 @@ def read_pair_rows(pair_file: Path) -> list[dict[str, str]]:
     return read_csv_rows(pair_file)
 
 
+def parse_pair_label(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, np.integer)):
+        return 1 if int(value) != 0 else 0
+    if isinstance(value, float):
+        if np.isnan(value):
+            return None
+        return 1 if int(value) != 0 else 0
+
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "t", "yes", "y", "same", "match", "positive"}:
+        return 1
+    if text in {"0", "false", "f", "no", "n", "different", "mismatch", "negative"}:
+        return 0
+    try:
+        return 1 if int(text) != 0 else 0
+    except ValueError:
+        return None
+
+
+def resolve_pair_ids(row: dict[str, str], args: argparse.Namespace) -> tuple[str, str] | None:
+    for key_a, key_b in [
+        (args.id_a_key, args.id_b_key),
+        ("sample_id_a", "sample_id_b"),
+    ]:
+        sample_a = str(row.get(key_a, "")).strip()
+        sample_b = str(row.get(key_b, "")).strip()
+        if sample_a and sample_b:
+            return sample_a, sample_b
+    return None
+
+
+def resolve_pair_label(row: dict[str, str], args: argparse.Namespace) -> int:
+    for key in [args.pair_label_key, "pair_label", "label"]:
+        if not key:
+            continue
+        parsed = parse_pair_label(row.get(key))
+        if parsed is not None:
+            return parsed
+    return 0
+
+
 def cosine_scores(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     dot = np.sum(a * b, axis=1)
     denom = np.maximum(np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1), 1e-8)
@@ -381,17 +431,23 @@ def split_pair_rows(pair_rows: list[dict[str, str]], args: argparse.Namespace) -
     return shuffled[:n_train], shuffled[n_train : n_train + n_val], shuffled[n_train + n_val :]
 
 
-def pair_arrays(pair_rows: list[dict[str, str]], feature_lookup: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
+def pair_arrays(
+    pair_rows: list[dict[str, str]],
+    feature_lookup: dict[str, np.ndarray],
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
     features: list[np.ndarray] = []
     labels: list[int] = []
     ids: list[tuple[str, str]] = []
     for row in pair_rows:
-        sample_a = row["sample_id_a"]
-        sample_b = row["sample_id_b"]
+        resolved = resolve_pair_ids(row, args)
+        if resolved is None:
+            continue
+        sample_a, sample_b = resolved
         if sample_a not in feature_lookup or sample_b not in feature_lookup:
             continue
         features.append(np.abs(feature_lookup[sample_a] - feature_lookup[sample_b]))
-        labels.append(int(row.get("pair_label", row.get("label", 0))))
+        labels.append(resolve_pair_label(row, args))
         ids.append((sample_a, sample_b))
     if not features:
         return np.zeros((0, 0), dtype=np.float32), np.zeros((0,), dtype=np.int64), ids
@@ -464,13 +520,15 @@ def run_verification(features: np.ndarray, index_rows: list[dict[str, str]], arg
             labels = []
             ids = []
             for row in rows_subset:
-                a = row["sample_id_a"]
-                b = row["sample_id_b"]
+                resolved = resolve_pair_ids(row, args)
+                if resolved is None:
+                    continue
+                a, b = resolved
                 if a not in feature_lookup or b not in feature_lookup:
                     continue
                 left.append(feature_lookup[a])
                 right.append(feature_lookup[b])
-                labels.append(int(row.get("pair_label", row.get("label", 0))))
+                labels.append(resolve_pair_label(row, args))
                 ids.append((a, b))
             if not left:
                 return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.int64), ids
@@ -483,6 +541,8 @@ def run_verification(features: np.ndarray, index_rows: list[dict[str, str]], arg
         threshold_source_labels = val_labels if val_labels.size else train_labels
         threshold = threshold_best_accuracy(threshold_source_labels, threshold_source_scores)
         metrics = {
+            "task": "verification",
+            "feature_key": args.feature_key,
             "train": evaluate_verification(train_scores, train_labels, threshold, args.far_target),
             "val": evaluate_verification(val_scores, val_labels, threshold, args.far_target) if val_scores.size else {"accuracy": 0.0, "auc": 0.0, "tar_at_far": 0.0, "threshold": float(threshold)},
             "test": evaluate_verification(test_scores, test_labels, threshold, args.far_target),
@@ -492,9 +552,9 @@ def run_verification(features: np.ndarray, index_rows: list[dict[str, str]], arg
         best_epoch = 0
         history: list[dict[str, float]] = []
     else:
-        train_x, train_y, _ = pair_arrays(train_rows, feature_lookup)
-        val_x, val_y, _ = pair_arrays(val_rows, feature_lookup)
-        test_x, test_y, test_ids = pair_arrays(test_rows, feature_lookup)
+        train_x, train_y, _ = pair_arrays(train_rows, feature_lookup, args)
+        val_x, val_y, _ = pair_arrays(val_rows, feature_lookup, args)
+        test_x, test_y, test_ids = pair_arrays(test_rows, feature_lookup, args)
         if args.standardize and len(train_x):
             mean, std = fit_standardizer(train_x)
             train_x = apply_standardizer(train_x, mean, std)
@@ -514,6 +574,8 @@ def run_verification(features: np.ndarray, index_rows: list[dict[str, str]], arg
         threshold_source_labels = val_y if val_scores.size else train_y
         threshold = threshold_best_accuracy(threshold_source_labels, threshold_source_scores)
         metrics = {
+            "task": "verification",
+            "feature_key": args.feature_key,
             "train": evaluate_verification(train_scores, train_y, threshold, args.far_target),
             "val": evaluate_verification(val_scores, val_y, threshold, args.far_target) if val_scores.size else {"accuracy": 0.0, "auc": 0.0, "tar_at_far": 0.0, "threshold": float(threshold)},
             "test": evaluate_verification(test_scores, test_y, threshold, args.far_target),
@@ -562,3 +624,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

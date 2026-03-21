@@ -7,17 +7,31 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 EXTRACTOR_SCRIPT="${EXTRACTOR_SCRIPT:-$ROOT_DIR/scripts/extract_qwen_vl_features.py}"
 MODEL_ID="${MODEL_ID:-$ROOT_DIR/models/Qwen3-VL-8B-Instruct}"
-DATASET_ROOT="${DATASET_ROOT:-$ROOT_DIR/data/lfw}"
+
 DATASET_NAME="${DATASET_NAME:-lfw}"
-PAIR_FILE="${PAIR_FILE:-$ROOT_DIR/data/lfw_pairs.csv}"
-OUTPUT_TAG="${OUTPUT_TAG:-lfw_full_mgpu_$(date +%Y%m%d_%H%M%S)}"
-WORK_ROOT="${WORK_ROOT:-$ROOT_DIR/runs/mgpu/$OUTPUT_TAG}"
-OUTPUT_FEATURE_ROOT="${OUTPUT_FEATURE_ROOT:-$ROOT_DIR/runs/features/$OUTPUT_TAG}"
-OUTPUT_PROBE_ROOT="${OUTPUT_PROBE_ROOT:-$ROOT_DIR/runs/probes/$OUTPUT_TAG}"
+FEATURE_VERSION="${FEATURE_VERSION:-ours_base}"
+DATASET_ROOT="${DATASET_ROOT:-}"
+if [[ -z "$DATASET_ROOT" ]]; then
+  if [[ "$DATASET_NAME" == "lfw" ]]; then
+    DATASET_ROOT="$ROOT_DIR/data/lfw"
+    if [[ ! -d "$DATASET_ROOT" && -d "$ROOT_DIR/data/lfw-dataset/lfw-deepfunneled/lfw-deepfunneled" ]]; then
+      DATASET_ROOT="$ROOT_DIR/data/lfw-dataset/lfw-deepfunneled/lfw-deepfunneled"
+    fi
+  elif [[ "$DATASET_NAME" == "stanford40" ]]; then
+    DATASET_ROOT="$ROOT_DIR/data/Stanford40/images"
+  else
+    echo "DATASET_ROOT is required when DATASET_NAME=$DATASET_NAME" >&2
+    exit 1
+  fi
+fi
+
+OUTPUT_FEATURE_ROOT="${OUTPUT_FEATURE_ROOT:-$ROOT_DIR/runs/features/$DATASET_NAME/$FEATURE_VERSION}"
+WORK_ROOT="${WORK_ROOT:-$ROOT_DIR/runs/mgpu/${DATASET_NAME}_${FEATURE_VERSION}}"
+FORCE_REEXTRACT="${FORCE_REEXTRACT:-0}"
+
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 PROCS_PER_GPU="${PROCS_PER_GPU:-1}"
 DEVICE_DTYPE="${DTYPE:-bfloat16}"
-PROBE_DEVICE="${PROBE_DEVICE:-cuda:0}"
 EPSILON="${EPSILON:-64.0}"
 DELTA_PRIV="${DELTA_PRIV:-1e-5}"
 DELTA_MASK="${DELTA_MASK:-0.05}"
@@ -31,26 +45,22 @@ FACE_CONF="${FACE_CONF:-0.20}"
 PERSON_CONF="${PERSON_CONF:-0.25}"
 YUNET_MODEL="${YUNET_MODEL:-$ROOT_DIR/models/face_detection_yunet_2023mar.onnx}"
 YUNET_SCORE_THRESHOLD="${YUNET_SCORE_THRESHOLD:-0.55}"
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-120}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
-TRAIN_LR="${TRAIN_LR:-1e-2}"
-TRAIN_WEIGHT_DECAY="${TRAIN_WEIGHT_DECAY:-1e-4}"
-SEED="${SEED:-42}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
 SAVE_TOKENS="${SAVE_TOKENS:-0}"
 EXTRA_EXTRACT_ARGS="${EXTRA_EXTRACT_ARGS:-}"
-EXTRA_PROBE_ARGS="${EXTRA_PROBE_ARGS:-}"
 KEEP_SHARDS="${KEEP_SHARDS:-1}"
 NOISE_SCALE_MULTIPLIER="${NOISE_SCALE_MULTIPLIER:-0.05}"
-NOISE_DISTRIBUTION="${NOISE_DISTRIBUTION:-spatial_diag}"
-SPATIAL_REWEIGHTING="${SPATIAL_REWEIGHTING:-true}"
 PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 LOG_UPDATE_INTERVAL="${LOG_UPDATE_INTERVAL:-20}"
 EXTRACT_STAGES="${EXTRACT_STAGES:-hpool_clean hpool_priv}"
-VERIFICATION_FEATURE_CLEAN="${VERIFICATION_FEATURE_CLEAN:-hpool_clean__head_mean}"
-VERIFICATION_FEATURE_PRIV="${VERIFICATION_FEATURE_PRIV:-hpool_priv__head_mean}"
-VERIFICATION_METRIC="${VERIFICATION_METRIC:-cosine}"
-FAR_TARGET="${FAR_TARGET:-0.01}"
+LIMIT="${LIMIT:-}"
+
+if [[ "$FORCE_REEXTRACT" != "1" && -f "$OUTPUT_FEATURE_ROOT/index.csv" ]]; then
+  if ls "$OUTPUT_FEATURE_ROOT"/pooled/*.npy >/dev/null 2>&1; then
+    echo "feature cache exists, skip extraction: $OUTPUT_FEATURE_ROOT"
+    exit 0
+  fi
+fi
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_IDS"
 SHARD_COUNT=$(( ${#GPU_ARRAY[@]} * PROCS_PER_GPU ))
@@ -63,7 +73,7 @@ MASTER_MANIFEST="$WORK_ROOT/master_manifest.jsonl"
 SHARD_MANIFEST_DIR="$WORK_ROOT/manifests"
 SHARD_OUTPUT_DIR="$WORK_ROOT/shards"
 LOG_DIR="$WORK_ROOT/logs"
-mkdir -p "$WORK_ROOT" "$SHARD_MANIFEST_DIR" "$SHARD_OUTPUT_DIR" "$LOG_DIR" "$OUTPUT_FEATURE_ROOT" "$OUTPUT_PROBE_ROOT"
+mkdir -p "$WORK_ROOT" "$SHARD_MANIFEST_DIR" "$SHARD_OUTPUT_DIR" "$LOG_DIR" "$OUTPUT_FEATURE_ROOT"
 
 "$PYTHON_BIN" "$ROOT_DIR/scripts/build_dataset_manifests.py" \
   --dataset-root "$DATASET_ROOT" \
@@ -71,6 +81,11 @@ mkdir -p "$WORK_ROOT" "$SHARD_MANIFEST_DIR" "$SHARD_OUTPUT_DIR" "$LOG_DIR" "$OUT
   --shard-count "$SHARD_COUNT" \
   --master-manifest "$MASTER_MANIFEST" \
   --shard-manifest-dir "$SHARD_MANIFEST_DIR"
+
+if [[ ! -s "$MASTER_MANIFEST" ]]; then
+  echo "no input samples found under DATASET_ROOT=$DATASET_ROOT" >&2
+  exit 1
+fi
 
 run_shard() {
   local shard_idx="$1"
@@ -81,6 +96,11 @@ run_shard() {
 
   mkdir -p "$shard_output"
   echo "[extract shard=$shard_idx gpu=$gpu_id] -> $shard_output"
+
+  if [[ ! -s "$shard_manifest" ]]; then
+    echo "[extract shard=$shard_idx gpu=$gpu_id] skipped empty shard manifest: $shard_manifest" > "$shard_log"
+    return 0
+  fi
 
   extract_cmd=(
     "$PYTHON_BIN" "$EXTRACTOR_SCRIPT"
@@ -115,6 +135,9 @@ run_shard() {
   fi
   if [[ -n "$FACE_MODEL" ]]; then
     extract_cmd+=(--face-model "$FACE_MODEL" --face-model-kind "$FACE_MODEL_KIND" --face-conf "$FACE_CONF")
+  fi
+  if [[ -n "$LIMIT" ]]; then
+    extract_cmd+=(--limit "$LIMIT")
   fi
   if [[ -n "$EXTRA_EXTRACT_ARGS" ]]; then
     # shellcheck disable=SC2206
@@ -299,90 +322,12 @@ for name, arrays in pooled_buffers.items():
 print(f'merged shard outputs into {out_root}')
 PY
 
-run_probe() {
-  local feature_key="$1"
-  local run_name="$2"
-  echo "[probe] $feature_key -> $OUTPUT_PROBE_ROOT/$run_name"
-  probe_cmd=(
-    "$PYTHON_BIN" "$ROOT_DIR/scripts/train_linear_probe.py"
-    --feature-root "$OUTPUT_FEATURE_ROOT"
-    --feature-key "$feature_key"
-    --task verification
-    --pair-file "$PAIR_FILE"
-    --metric "$VERIFICATION_METRIC"
-    --far-target "$FAR_TARGET"
-    --output "$OUTPUT_PROBE_ROOT/$run_name"
-    --epochs "$TRAIN_EPOCHS"
-    --batch-size "$TRAIN_BATCH_SIZE"
-    --lr "$TRAIN_LR"
-    --weight-decay "$TRAIN_WEIGHT_DECAY"
-    --seed "$SEED"
-    --device "$PROBE_DEVICE"
-  )
-  if [[ -n "$EXTRA_PROBE_ARGS" ]]; then
-    # shellcheck disable=SC2206
-    extra_probe=( $EXTRA_PROBE_ARGS )
-    probe_cmd+=("${extra_probe[@]}")
-  fi
-  "${probe_cmd[@]}"
-}
-
-echo "[probe 1/2] clean verification"
-run_probe "$VERIFICATION_FEATURE_CLEAN" "clean_verification"
-
-echo "[probe 2/2] priv verification"
-run_probe "$VERIFICATION_FEATURE_PRIV" "priv_verification"
-
-SUMMARY_PATH="$OUTPUT_PROBE_ROOT/summary.json"
-export SUMMARY_PATH OUTPUT_FEATURE_ROOT OUTPUT_PROBE_ROOT EPSILON DELTA_PRIV DELTA_MASK CLIP_NORM PATCH_ALPHA UPPER_BODY_WEIGHT GPU_IDS PROCS_PER_GPU DEVICE_DTYPE DATASET_ROOT MODEL_ID NOISE_SCALE_MULTIPLIER NOISE_DISTRIBUTION SPATIAL_REWEIGHTING EXTRACTOR_SCRIPT PAIR_FILE VERIFICATION_FEATURE_CLEAN VERIFICATION_FEATURE_PRIV VERIFICATION_METRIC FAR_TARGET
-"$PYTHON_BIN" - <<'PY'
-import json
-import os
-from pathlib import Path
-
-probe_root = Path(os.environ['OUTPUT_PROBE_ROOT'])
-feature_root = Path(os.environ['OUTPUT_FEATURE_ROOT'])
-summary = {
-    'feature_root': str(feature_root),
-    'probe_root': str(probe_root),
-    'dataset_root': os.environ['DATASET_ROOT'],
-    'pair_file': os.environ['PAIR_FILE'],
-    'model_id': os.environ['MODEL_ID'],
-    'extractor_script': os.environ['EXTRACTOR_SCRIPT'],
-    'epsilon': float(os.environ['EPSILON']),
-    'delta_priv': float(os.environ['DELTA_PRIV']),
-    'delta_mask': float(os.environ['DELTA_MASK']),
-    'clip_norm': float(os.environ['CLIP_NORM']),
-    'noise_scale_multiplier': float(os.environ['NOISE_SCALE_MULTIPLIER']),
-    'noise_distribution': os.environ['NOISE_DISTRIBUTION'],
-    'spatial_reweighting': os.environ['SPATIAL_REWEIGHTING'].lower() == 'true',
-    'patch_alpha': float(os.environ['PATCH_ALPHA']),
-    'upper_body_weight': float(os.environ['UPPER_BODY_WEIGHT']),
-    'gpu_ids': os.environ['GPU_IDS'],
-    'procs_per_gpu': int(os.environ['PROCS_PER_GPU']),
-    'dtype': os.environ['DEVICE_DTYPE'],
-    'verification_metric': os.environ['VERIFICATION_METRIC'],
-    'far_target': float(os.environ['FAR_TARGET']),
-    'verification_feature_clean': os.environ['VERIFICATION_FEATURE_CLEAN'],
-    'verification_feature_priv': os.environ['VERIFICATION_FEATURE_PRIV'],
-    'results': {},
-}
-for name in ['clean_verification', 'priv_verification']:
-    metrics_path = probe_root / name / 'metrics.json'
-    if metrics_path.exists():
-        summary['results'][name] = json.loads(metrics_path.read_text(encoding='utf-8'))
-summary_path = Path(os.environ['SUMMARY_PATH'])
-summary_path.write_text(json.dumps(summary, indent=2), encoding='utf-8')
-print(json.dumps(summary, indent=2))
-PY
-
 if [[ "$KEEP_SHARDS" != "1" ]]; then
   rm -rf "$SHARD_OUTPUT_DIR" "$SHARD_MANIFEST_DIR"
 fi
 
 echo
 echo "done"
-echo "work_root:      $WORK_ROOT"
+echo "dataset:        $DATASET_NAME"
+echo "feature_version:$FEATURE_VERSION"
 echo "feature_root:   $OUTPUT_FEATURE_ROOT"
-echo "probe_root:     $OUTPUT_PROBE_ROOT"
-echo "summary:        $SUMMARY_PATH"
