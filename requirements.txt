@@ -1,0 +1,25 @@
+# Core ML
+torch>=2.5.0
+numpy
+scipy
+
+# HuggingFace ecosystem
+transformers>=4.51.0
+datasets
+accelerate
+safetensors
+peft
+huggingface_hub
+
+# Data processing
+pandas
+Pillow
+requests
+tqdm
+
+# External APIs
+openai
+wandb
+
+# verl - install from source:
+#   pip install verl  or  pip install git+https://github.com/volcengine/verl.git

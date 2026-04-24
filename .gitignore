@@ -1,0 +1,45 @@
+# =========================
+# Python / packaging
+# =========================
+__pycache__/
+*.py[oc]
+*.so
+*.pyd
+*.egg-info/
+build/
+dist/
+wheels/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Environments / local tools
+# =========================
+.venv/
+venv/
+.env
+.env.*
+.python-version
+
+# =========================
+# OS / editor noise
+# =========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# =========================
+# Experiment artifacts
+# =========================
+log/
+outputs/
+wandb/
+vision_dp_debug/
+debug_out/
+tea_debug.log
+
+# Large local assets / temp
+data/
+*.deb
